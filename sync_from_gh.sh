@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==========================================
-# GitHub -> APT 私有源 高级同步与管理脚本 v3.1
+# GitHub -> APT 私有源 高级同步与管理脚本 v3.2
 # ==========================================
 
 APT_DIR="/srv/apt"
@@ -60,11 +60,11 @@ publish_package() {
 while true; do
     echo ""
     echo "========================================"
-    echo " 🤖 RoboParty 仓库高级分发助手 v3.1"
+    echo " 🤖 RoboParty 仓库高级分发助手 v3.2"
     echo "========================================"
 
     PS3="👉 请选择主功能序号: "
-    select MAIN_OP in "📥 从 GitHub 拉取并发布 (支持Zip自动解压)" "💻 手动发布本地 .deb 包" "🗑️ 移除指定软件包" "🧹 深度体检与批量清理旧包" "🚪 退出脚本"; do
+    select MAIN_OP in "📥 从 GitHub 拉取并发布 (支持Zip自动解压)" "📤 从 Artifact 创建 GitHub Release" "💻 手动发布本地 .deb 包" "🗑️ 移除指定软件包" "🧹 深度体检与批量清理旧包" "🚪 退出脚本"; do
         case $MAIN_OP in
 
             # ==========================================
@@ -189,7 +189,153 @@ while true; do
                 ;;
 
             # ==========================================
-            # 功能 2：本地指定文件发包
+            # 功能 2：从 Artifact 创建 GitHub Release
+            # ==========================================
+            "📤 从 Artifact 创建 GitHub Release")
+                echo ""
+                read -p "请输入 GitHub 仓库名 [直接回车默认 wentywenty/roboto_motors]: " REPO_INPUT
+                REPO_NAME=${REPO_INPUT:-"wentywenty/roboto_motors"}
+
+                echo ""
+                read -p "🏷️ 请输入发布版本号 (例如 v1.2.3): " RELEASE_TAG
+                if [ -z "$RELEASE_TAG" ]; then
+                    echo "❌ 版本号不能为空，已取消操作。"
+                    break
+                fi
+
+                # 检查 tag 是否已存在
+                if gh release view "$RELEASE_TAG" -R "$REPO_NAME" >/dev/null 2>&1; then
+                    echo "❌ Tag $RELEASE_TAG 已存在，请勿重复发布。"
+                    break
+                fi
+
+                echo ""
+                read -p "📝 请输入 Release 标题 [直接回车默认使用版本号 $RELEASE_TAG]: " RELEASE_TITLE
+                RELEASE_TITLE=${RELEASE_TITLE:-$RELEASE_TAG}
+
+                echo ""
+                read -p "📋 请输入 Release 描述 (可选，直接回车跳过): " RELEASE_NOTES
+
+                TMP_DIR=$(mktemp -d)
+                cd "$TMP_DIR" || break
+
+                echo ""
+                echo "🔍 请选择要拉取 Artifact 包的来源:"
+                PS3="👉 请输入来源序号: "
+                select SOURCE in "最新 Actions Artifact (自动构建版)" "指定 Run ID" "取消"; do
+                    case $SOURCE in
+                        "最新 Actions Artifact (自动构建版)")
+                            echo "⏳ 正在查询最新成功构建..."
+                            AUTO_RUN_ID=$(gh run list -R "$REPO_NAME" --limit 20 --json databaseId,conclusion -q '[.[] | select(.conclusion=="success")][0].databaseId')
+
+                            if [ -n "$AUTO_RUN_ID" ] && [ "$AUTO_RUN_ID" != "null" ]; then
+                                echo "✅ 自动找到最新成功记录: $AUTO_RUN_ID"
+                            else
+                                echo "⚠️ 前20条里没找到 success 的记录。"
+                            fi
+
+                            echo ""
+                            read -p "👉 请输入 Run ID [直接回车默认使用 $AUTO_RUN_ID]: " INPUT_RUN_ID
+                            FINAL_RUN_ID=${INPUT_RUN_ID:-$AUTO_RUN_ID}
+                            break
+                            ;;
+                        "指定 Run ID")
+                            read -p "👉 请输入 Run ID: " INPUT_RUN_ID
+                            FINAL_RUN_ID=$INPUT_RUN_ID
+                            break
+                            ;;
+                        "取消") break 3 ;;
+                        *) echo "❌ 无效序号" ;;
+                    esac
+                done
+
+                if [ -z "$FINAL_RUN_ID" ] || [ "$FINAL_RUN_ID" == "null" ]; then
+                    echo "❌ 没有有效的 Run ID，操作取消。"
+                    cd - > /dev/null
+                    rm -rf "$TMP_DIR"
+                    break
+                fi
+
+                echo "📥 正在下载 Run ID: $FINAL_RUN_ID 的产物..."
+                DOWNLOAD_OUTPUT=$(gh run download "$FINAL_RUN_ID" -R "$REPO_NAME" -D "$TMP_DIR/downloaded_artifacts" 2>&1)
+                DOWNLOAD_RC=$?
+
+                if [ $DOWNLOAD_RC -ne 0 ]; then
+                    echo "❌ 下载 Artifact 失败:"
+                    echo "$DOWNLOAD_OUTPUT"
+                    cd - > /dev/null
+                    rm -rf "$TMP_DIR"
+                    break
+                fi
+
+                # 收集所有需要上传的文件 (.deb, .zip)
+                UPLOAD_FILES=()
+                while IFS= read -r -d '' f; do
+                    UPLOAD_FILES+=("$f")
+                done < <(find "$TMP_DIR/downloaded_artifacts" -type f \( -name "*.deb" -o -name "*.zip" \) -print0)
+
+                if [ ${#UPLOAD_FILES[@]} -eq 0 ]; then
+                    echo "⚠️ Artifact 中没有找到 .deb 或 .zip 文件，将上传所有文件。"
+                    while IFS= read -r -d '' f; do
+                        UPLOAD_FILES+=("$f")
+                    done < <(find "$TMP_DIR/downloaded_artifacts" -type f -print0)
+                fi
+
+                if [ ${#UPLOAD_FILES[@]} -eq 0 ]; then
+                    echo "❌ Artifact 中没有任何文件，操作取消。"
+                    cd - > /dev/null
+                    rm -rf "$TMP_DIR"
+                    break
+                fi
+
+                echo ""
+                echo "📦 将上传以下文件到 Release $RELEASE_TAG:"
+                for f in "${UPLOAD_FILES[@]}"; do
+                    echo "   - $(basename "$f")"
+                done
+
+                echo ""
+                read -p "🚀 确认创建 Release 并上传以上文件？ [Y/n]: " CONFIRM_RELEASE
+                if [[ "$CONFIRM_RELEASE" == "n" || "$CONFIRM_RELEASE" == "N" ]]; then
+                    echo "🚪 已取消操作。"
+                    cd - > /dev/null
+                    rm -rf "$TMP_DIR"
+                    break
+                fi
+
+                echo ""
+                echo "🏷️ 正在创建 Release $RELEASE_TAG ..."
+
+                # 构建 gh release create 命令
+                RELEASE_CMD=(gh release create "$RELEASE_TAG" -R "$REPO_NAME" -t "$RELEASE_TITLE")
+                if [ -n "$RELEASE_NOTES" ]; then
+                    RELEASE_CMD+=(-n "$RELEASE_NOTES")
+                fi
+
+                # 添加所有上传文件
+                for f in "${UPLOAD_FILES[@]}"; do
+                    RELEASE_CMD+=("$f")
+                done
+
+                # 执行发布
+                "${RELEASE_CMD[@]}"
+
+                if [ $? -eq 0 ]; then
+                    echo ""
+                    echo "🎉 Release $RELEASE_TAG 创建成功！"
+                    echo "🔗 查看地址: https://github.com/$REPO_NAME/releases/tag/$RELEASE_TAG"
+                else
+                    echo ""
+                    echo "❌ Release 创建失败，请检查错误信息。"
+                fi
+
+                cd - > /dev/null
+                rm -rf "$TMP_DIR"
+                break
+                ;;
+
+            # ==========================================
+            # 功能 3：本地指定文件发包
             # ==========================================
             "💻 手动发布本地 .deb 包")
                 echo ""
