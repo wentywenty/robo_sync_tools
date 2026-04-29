@@ -86,7 +86,12 @@ while true; do
                         "最新 Release (稳定版)")
                             echo "⏳ 正在从 $REPO_NAME 拉取..."
                             # 同时拉取 deb 和 zip 格式
-                            gh release download -R "$REPO_NAME" -p "*.deb" -p "*.zip" 2>/dev/null || gh release download -R "$REPO_NAME"
+                            if ! gh release download -R "$REPO_NAME" -p "*.deb" -p "*.zip" 2>&1; then
+                                echo "⚠️ 未找到 .deb 或 .zip 资源，尝试拉取所有文件..."
+                                if ! gh release download -R "$REPO_NAME" -p "*"; then
+                                    echo "❌ 该 Release 没有任何可下载的资源。"
+                                fi
+                            fi
                             break
                             ;;
                         "最新 Actions Artifact (自动构建版)")
@@ -204,9 +209,23 @@ while true; do
                 fi
 
                 # 检查 tag 是否已存在
+                RELEASE_EXISTS=false
                 if gh release view "$RELEASE_TAG" -R "$REPO_NAME" >/dev/null 2>&1; then
-                    echo "❌ Tag $RELEASE_TAG 已存在，请勿重复发布。"
-                    break
+                    echo "⚠️ Release $RELEASE_TAG 已存在！"
+                    read -p "🗑️ 是否删除旧 Release 并重新发布？ [y/N]: " DELETE_OLD
+                    if [[ "$DELETE_OLD" != "y" && "$DELETE_OLD" != "Y" ]]; then
+                        echo "🚪 已取消操作。"
+                        break
+                    fi
+                    echo "🗑️ 正在删除旧 Release $RELEASE_TAG ..."
+                    gh release delete "$RELEASE_TAG" -R "$REPO_NAME" --yes
+                    gh api -X DELETE "repos/$REPO_NAME/git/refs/tags/$RELEASE_TAG" 2>/dev/null || true
+                    if [ $? -ne 0 ]; then
+                        echo "❌ 删除旧 Release 失败，请手动处理。"
+                        break
+                    fi
+                    echo "✅ 旧 Release 已删除。"
+                    RELEASE_EXISTS=true
                 fi
 
                 echo ""
@@ -256,9 +275,10 @@ while true; do
                     break
                 fi
 
-                echo "📥 正在下载 Run ID: $FINAL_RUN_ID 的产物..."
+                echo "📥 正在下载 Run ID: $FINAL_RUN_ID 的产物 (请稍候)..."
                 DOWNLOAD_OUTPUT=$(gh run download "$FINAL_RUN_ID" -R "$REPO_NAME" -D "$TMP_DIR/downloaded_artifacts" 2>&1)
                 DOWNLOAD_RC=$?
+                echo "📥 下载命令执行完毕。"
 
                 if [ $DOWNLOAD_RC -ne 0 ]; then
                     echo "❌ 下载 Artifact 失败:"
